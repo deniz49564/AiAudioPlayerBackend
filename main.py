@@ -2,61 +2,76 @@ import requests
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 
-# 🚀 KRİTİK: Uvicorn'un bulabilmesi için değişken ismi kesinlikle 'app' olmalı
-app = FastAPI(
-    title="AiAudioPlayer Backend",
-    description="Piped API Entegrasyonlu Premium Müzik Akış Sunucusu"
-)
+app = FastAPI(title="AiAudioPlayer Backend")
 
-# 🌐 Android uygulamanın sunucuya güvenle bağlanabilmesi için CORS ayarları
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Geliştirme aşamasında tüm kökenlere izin veriyoruz
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# 🌍 Güvenilir ve yüksek performanslı ana Piped API adresi
-PIPED_API_URL = "https://pipedapi.kavin.rocks"
+# 🚀 PREMIUM YEDEKLİ SİSTEM: Ana sunucu yanıt vermezse arka arkaya diğerlerini dener.
+PIPED_MIRRORS = [
+    "https://pipedapi.kavin.rocks",
+    "https://api.piped.projectsegfaut.space",
+    "https://piped-api.garudalinux.org",
+    "https://pipedapi.tokhmi.xyz"
+]
+
+def safe_get_request(endpoint_path: str):
+    """Listede aktif olan ilk çalışan Piped sunucusundan veriyi çeker."""
+    for base_url in PIPED_MIRRORS:
+        try:
+            url = f"{base_url}{endpoint_path}"
+            # Render'ı yormamak için timeout süresini 4 saniye tutuyoruz
+            response = requests.get(url, timeout=4) 
+            if response.status_code == 200:
+                return response.json()
+        except Exception as e:
+            print(f"Sunucu hatası ({base_url}): {str(e)} - Sonraki deneniyor...")
+            continue
+    return None
+
 
 @app.get("/")
 async def root():
-    """Sunucunun canlı olup olmadığını kontrol etmek için ana ucumuz."""
-    return {"status": "success", "message": "AiAudioPlayer Backend tıkır tıkır çalışıyor!"}
+    return {"status": "success", "message": "Backend Aktif!"}
 
 
 @app.get("/api/search")
-async def search_music(query: str = Query(..., description="Aranacak şarkı veya sanatçı adı")):
-    """
-    🎵 AI destekli arama ucu. Piped API üzerinden YouTube sonuçlarını getirir.
-    Android tarafındaki 'BackendResponse' şeması ile tam uyumludur.
-    """
+async def search_music(query: str = Query(...)):
+    """Yedekli sunucu havuzunu kullanarak arama yapar."""
     try:
-        # Piped arama ucuna istek atıyoruz (Sadece müzik/video sonuçları için filtre ekledik)
-        search_url = f"{PIPED_API_URL}/search?q={query}&filter=videos"
-        response = requests.get(search_url, timeout=10)
+        # Sunucu havuzundan güvenli şekilde veriyi talep ediyoruz
+        data = safe_get_request(f"/search?q={query}&filter=videos")
         
-        if response.status_code != 200:
-            raise HTTPException(status_code=502, detail="Arama servisine şu an erişilemiyor.")
+        if not data:
+            raise HTTPException(
+                status_code=502, 
+                detail="Şu an tüm Piped servisleri yoğun. Lütfen birkaç saniye sonra tekrar deneyin."
+            )
             
-        results = response.json().get("items", [])
+        results = data.get("items", [])
         formatted_data = []
         
         for item in results:
-            # Sadece video tipindeki içerikleri Android'in anlayacağı şemaya dönüştürüyoruz
             if item.get("type") == "stream":
-                formatted_data.append({
-                    "id": item.get("url", "").split("=")[-1] or item.get("title", "").replace(" ", "_"),
-                    "title": item.get("title", "Bilinmeyen Şarkı"),
-                    "artist": item.get("uploaderName", "Yapay Zeka Sanatçısı"),
-                    "sourcePlatform": "YouTube (via Piped)",
-                    # Android tarafındaki 'toAudioModel' extension fonksiyonumuz için 
-                    # stream linkini tetikleyecek backend ucunu gömüyoruz
-                    "downloadUrl": f"/api/stream?video_id={item.get('url', '').split('=')[-1]}",
-                    "coverUrl": item.get("thumbnail", "https://picsum.photos/400/400?random=1"),
-                    "isDownloading": False
-                })
+                v_id = item.get("url", "").split("=")[-1]
+                if not v_id and "streams/" in item.get("url", ""):
+                    v_id = item.get("url", "").split("/")[-1]
+                    
+                if v_id:
+                    formatted_data.append({
+                        "id": v_id,
+                        "title": item.get("title", "Bilinmeyen Şarkı"),
+                        "artist": item.get("uploaderName", "Yapay Zeka Sanatçısı"),
+                        "sourcePlatform": "YouTube (via Piped)",
+                        "downloadUrl": f"/api/stream?video_id={v_id}",
+                        "coverUrl": item.get("thumbnail", "https://picsum.photos/400/400?random=1"),
+                        "isDownloading": False
+                    })
                 
         return {
             "status": "success",
@@ -64,31 +79,28 @@ async def search_music(query: str = Query(..., description="Aranacak şarkı vey
             "data": formatted_data
         }
         
+    except HTTPException as he:
+        raise he
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Arama Hatası: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Arama Sistem Hatası: {str(e)}")
 
 
 @app.get("/api/stream")
-async def get_stream_url(video_id: str = Query(..., description="YouTube Video ID değeri")):
-    """
-    🔊 ExoPlayer için ham ses akış (.m4a/.webm) URL'i üreten kritik ucumuz.
-    YouTube bot engeline takılmayan Piped altyapısını kullanır.
-    """
+async def get_stream_url(video_id: str = Query(...)):
+    """Yedekli sunucu havuzunu kullanarak ham ses linkini çözer."""
     try:
-        # Piped API'sinden ilgili videonun ham medya linklerini talep ediyoruz
-        stream_url = f"{PIPED_API_URL}/streams/{video_id}"
-        response = requests.get(stream_url, timeout=10)
+        data = safe_get_request(f"/streams/{video_id}")
         
-        if response.status_code != 200:
-            raise HTTPException(status_code=502, detail="Medya sunucusundan yanıt alınamadı.")
+        if not data:
+            raise HTTPException(
+                status_code=502, 
+                detail="Müzik bağlantısı şu an çözülemedi, lütfen tekrar deneyin."
+            )
             
-        data = response.json()
         audio_streams = data.get("audioStreams", [])
-        
         if not audio_streams:
-            raise HTTPException(status_code=404, detail="Bu video için uygun bir ses akışı bulunamadı.")
+            raise HTTPException(status_code=404, detail="Ses akışı bulunamadı.")
             
-        # 🌟 ExoPlayer'ın en akıcı çalabileceği en yüksek bitrate'li ses kanalını seçiyoruz
         best_audio = max(audio_streams, key=lambda x: x.get("bitrate", 0))
         
         return {
@@ -96,7 +108,7 @@ async def get_stream_url(video_id: str = Query(..., description="YouTube Video I
             "stream_url": best_audio.get("url")
         }
         
-    except requests.exceptions.Timeout:
-        raise HTTPException(status_code=504, detail="YouTube veri çekme işlemi zaman aşımına uğradı.")
+    except HTTPException as he:
+        raise he
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Akış Hatası: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Akış Sistem Hatası: {str(e)}")
