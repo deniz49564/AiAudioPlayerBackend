@@ -4,43 +4,59 @@ import os
 
 app = FastAPI(title="AiAudioPlayer Premium AI Backend")
 
+# EMNİYET KİLİDİ: Eğer Render sunucusunda eski 'cookies.txt' kalmışsa zorla temizle
+if os.path.exists("cookies.txt"):
+    try:
+        os.remove("cookies.txt")
+        print("--> SYSTEM: Eski bozuk cookies.txt dosyası diskten tamamen silindi.")
+    except Exception as e:
+        print(f"--> SYSTEM: cookies.txt silinirken hata: {e}")
+
+# Senin tarayıcıdan getirdiğin tertemiz çerez havuzu
+YT_COOKIE = (
+    "_Secure-BUCKET=CLMB; VISITOR_INFO1_LIVE=8yWHsmdcEao; VISITOR_PRIVACY_METADATA=CgJUUhIEGgAgQg%3D%3D; "
+    "__Secure-3PAPISID=SLzgrhVDJ4IJoWw_/A4rMC3ddomwxvMfhY; "
+    "__Secure-3PSID=g.a0009Ag40I8M2ZXnDU1ERRsznH_7ZXM0ODUAS8dHf9TNkPYTZcECJiCWcFIp6wJ5DzyXuamhwgACgYKAaYSARYSFQHGX2MiDr1NG5EVktncB_z_laPzrxoVAUF8yKrTwwy_wwVF7N1rcb_AN_P00076; "
+    "LOGIN_INFO=AFmmF2swRAIgEv2p2_qZlZnfFlKqQGD1JAy3NlQ4ROFwjxkvBt3r7uQCIB_sQqVh7MqVwPmAhKBv0FnZ8lI4HHZyNltmV78y-l34:QUQ3MjNmd0R6VDEzaTVXWVZnYUhxYzRybWg5M0VsVl9kbFJHRnJhaHdWSVdEOG5MckZ6eVJNY3NnOURvcTBXaWpKeDRHZ3JnRUwwV29WRF80eGVIbk01dnVLQ3N2a2V5THdoQ0VuRFhFUlFzN1czUkEzdFZxaFNJSjJWV3hMcHd3VWx4TWZYcEpLWWdvSTQ4RDA4eGJVbWdyNG9LbDd3ZGNR; "
+    "PREF=f4=4000000&tz=Europe.Istanbul; "
+    "__Secure-YNID=18.YT=ifhEjKvJEm2ZyuSN-6eL9r8Amde4PsFzBFv2wNcPvvt7jbF5O7Xjxoqx_q-vW-am6uRGW-NDfqTI0RTHeymy-f8wX2XYor2H5As8H51Y_dhrBzmtuLxq4grPQ1h_bYB6hfG3ZsRSBEm3jjBRfq7eIERXthX6i6ci4DRtuPmuAXbagtZXOvO3j3l0zoI7KMiDfa_MDcJRN3VF4l4EmxkxFR__PuWM4_8Hw2Kzq6MR3wmf7F2u8HX-emAvQunTX2nqL9k_DAw-8PN3P2tPHBQbdSrTBMqRMsh5owl1GpR6jBzpMRz4R5wgYIv56jUIUlSeBkwegvWj4B_PJa2hEsObdA; "
+    "YSC=7u42lJAxJ-g; __Secure-ROLLOUT_TOKEN=CLm9-8GM7qOT6QEQjY6_6Pb0kwMY6oPnm9W-lAM%3D; "
+    "__Secure-1PSIDTS=sidts-CjUBhkeRd7_62jHdgOTNRbCaUbicC8wskOP3uvvyVw0rrBYJytQALra3fk78-lh7RlgEYboTSxAA; "
+    "__Secure-3PSIDTS=sidts-CjUBhkeRd7_62jHdgOTNRbCaUbicC8wskOP3uvvyVw0rrBYJytQALra3fk78-lh7RlgEYboTSxAA; "
+    "__Secure-3PSIDCC=AKEyXzXaWeNW3RmKmPSmQfchWrhvdobw6z2Jx3X4mwxshmKGhjCtkm4Rkei81mgA4w_uTJS586c"
+)
+
+YT_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+
 @app.get("/api/search")
 async def search_music(query: str = Query(..., description="Aranacak müzik veya AI promptu")):
-    """
-    Kullanıcının girdiği promptu alır, arkada YouTube üzerinden
-    en uygun sonuçları tarar ve Android uygulamasının doğrudan oynatabileceği 
-    akış (stream) linkleriyle birlikte temiz bir JSON döner.
-    """
     if not query.strip():
         raise HTTPException(status_code=400, detail="Arama sorgusu boş olamaz.")
 
-    # COOKIE KONTROLÜ: Projenin ana dizininde cookies.txt var mı kontrol et
-    cookie_path = "cookies.txt"
-    
-    # yt-dlp temel konfigürasyon ayarları
+    # Kesinlikle dosya ismi parametresi vermiyoruz, sadece HTTP Header kullanıyoruz
     ydl_opts = {
         'format': 'bestaudio/best',
         'noplaylist': True,
         'quiet': True,
         'skip_download': True,
         'extract_flat': False,
-        # YouTube'un imza çözme (signature deciphering) işlemlerini hızlandırmak ve uyumluluğu artırmak için:
         'nocheckcertificate': True,
-        'ignoreerrors': True, 
+        'ignoreerrors': True,
+        'http_headers': {
+            'User-Agent': YT_USER_AGENT,
+            'Cookie': YT_COOKIE,
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,video/webm,*/*;q=0.8',
+            'Accept-Language': 'tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7',
+            'Cache-Control': 'no-cache',
+            'Pragma': 'no-cache',
+        }
     }
-
-    # Eğer cookies.txt dosyası sunucuda mevcutsa ayarlara enjekte et
-    if os.path.exists(cookie_path):
-        ydl_opts['cookiefile'] = cookie_path
-        print("--> SUCCESS: cookies.txt bulundu ve yt-dlp sistemine entegre edildi.")
-    else:
-        print("--> WARNING: cookies.txt bulunamadı! İstekler anonim (IP tabanlı) gönderiliyor.")
 
     results = []
     
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            # Kullanıcının arama sorgusunun başına 'ytsearch3:' koyarak aratıyoruz
+            print(f"--> INFO: '{query}' araması ham başlık enjeksiyonu ile tetikleniyor...")
             search_results = ydl.extract_info(f"ytsearch3:{query}", download=False)
             
             if search_results and 'entries' in search_results:
@@ -48,7 +64,6 @@ async def search_music(query: str = Query(..., description="Aranacak müzik veya
                     if not entry:
                         continue
                     
-                    # yt-dlp bazen doğrudan akış (stream) url'ini vermezse orijinal video linkini fallback yapalım
                     stream_url = entry.get("url") or f"https://www.youtube.com/watch?v={entry.get('id')}"
                         
                     results.append({
@@ -64,9 +79,8 @@ async def search_music(query: str = Query(..., description="Aranacak müzik veya
         return {"status": "success", "count": len(results), "data": results}
 
     except Exception as e:
-        # Sunucu tamamen çökmesin (HTTP 500 vermesin), en azından boş liste veya anlamlı bir log dönsün
-        print(f"yt-dlp tarama hatası: {str(e)}")
+        print(f"--> CRITICAL: Tarama esnasında hata: {str(e)}")
         raise HTTPException(
             status_code=500, 
-            detail=f"YouTube bot filtresine takıldı veya kaynak tükenmesi oluştu. Lütfen çerezleri güncelleyin. Hata: {str(e)}"
+            detail=f"Müzik kaynakları taranırken hata oluştu. Hata: {str(e)}"
         )
