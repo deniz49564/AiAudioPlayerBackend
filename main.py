@@ -12,7 +12,7 @@ if os.path.exists("cookies.txt"):
     except Exception as e:
         print(f"--> SYSTEM: cookies.txt silinirken hata: {e}")
 
-# Senin tarayıcıdan getirdiğin tertemiz çerez havuzu
+# Tarayıcıdan getirdiğin çerez havuzu
 YT_COOKIE = (
     "_Secure-BUCKET=CLMB; VISITOR_INFO1_LIVE=8yWHsmdcEao; VISITOR_PRIVACY_METADATA=CgJUUhIEGgAgQg%3D%3D; "
     "__Secure-3PAPISID=SLzgrhVDJ4IJoWw_/A4rMC3ddomwxvMfhY; "
@@ -30,25 +30,23 @@ YT_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (K
 
 @app.get("/api/search")
 async def search_music(query: str = Query(..., description="Aranacak müzik veya AI promptu")):
-    if not query.strip():
+    # URL'den gelebilecek olası boşluk ve satır başı karakterlerini temizle
+    clean_query = query.strip()
+    if not clean_query:
         raise HTTPException(status_code=400, detail="Arama sorgusu boş olamaz.")
 
-    # Kesinlikle dosya ismi parametresi vermiyoruz, sadece HTTP Header kullanıyoruz
+    # İmza (Signature) hatalarını aşmak için 'extract_flat': True moduna geçiyoruz
     ydl_opts = {
-        'format': 'bestaudio/best',
-        'noplaylist': True,
         'quiet': True,
         'skip_download': True,
-        'extract_flat': False,
+        'extract_flat': True,  # KRİTİK: Videonun içine girmeden listeden veriyi hızlıca çeker, imza hatası vermez.
         'nocheckcertificate': True,
         'ignoreerrors': True,
         'http_headers': {
             'User-Agent': YT_USER_AGENT,
             'Cookie': YT_COOKIE,
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,video/webm,*/*;q=0.8',
-            'Accept-Language': 'tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7',
-            'Cache-Control': 'no-cache',
-            'Pragma': 'no-cache',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'tr-TR,tr;q=0.9,en-US;q=0.8',
         }
     }
 
@@ -56,26 +54,32 @@ async def search_music(query: str = Query(..., description="Aranacak müzik veya
     
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            print(f"--> INFO: '{query}' araması ham başlık enjeksiyonu ile tetikleniyor...")
-            search_results = ydl.extract_info(f"ytsearch3:{query}", download=False)
+            print(f"--> INFO: '{clean_query}' araması hafifletilmiş düz tarama modu ile tetikleniyor...")
+            search_results = ydl.extract_info(f"ytsearch3:{clean_query}", download=False)
             
             if search_results and 'entries' in search_results:
                 for entry in search_results['entries']:
                     if not entry:
                         continue
                     
-                    stream_url = entry.get("url") or f"https://www.youtube.com/watch?v={entry.get('id')}"
+                    video_id = entry.get("id") or entry.get("url")
+                    if not video_id:
+                        continue
                         
+                    # YouTube standart izleme veya doğrudan video linki kurgusu
+                    fallback_url = f"https://www.youtube.com/watch?v={video_id}" if not str(video_id).startswith("http") else video_id
+                    
                     results.append({
-                        "id": entry.get("id", ""),
-                        "title": entry.get("title", "Bilinmeyen Şarkı"),
-                        "artist": entry.get("uploader", "AI Artist"),
+                        "id": video_id,
+                        "title": entry.get("title") or entry.get("name") or "Bilinmeyen Şarkı",
+                        "artist": entry.get("uploader") or entry.get("channel") or "AI Artist",
                         "sourcePlatform": "YouTube/AI Cloud",
-                        "downloadUrl": stream_url, 
-                        "coverUrl": f"https://img.youtube.com/vi/{entry.get('id')}/hqdefault.jpg",
+                        "downloadUrl": fallback_url, 
+                        "coverUrl": f"https://img.youtube.com/vi/{video_id}/hqdefault.jpg",
                         "isDownloading": False
                     })
                     
+        print(f"--> SUCCESS: Hafif tarama moduyla {len(results)} sonuç başarıyla paketlendi.")
         return {"status": "success", "count": len(results), "data": results}
 
     except Exception as e:
