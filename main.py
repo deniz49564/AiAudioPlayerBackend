@@ -78,7 +78,7 @@ async def search_music(query: str = Query(..., description="Aranacak şarkı ad�
                         "artist": item.get("channel", "Yapay Zeka Sanatçısı"),
                         "sourcePlatform": "YouTube Premium (OAuth)",
                         "downloadUrl": f"/api/stream?video_id={v_id}",
-                        "coverUrl": f"[https://img.youtube.com/vi/](https://img.youtube.com/vi/){v_id}/hqdefault.jpg",
+                        "coverUrl": f"https://img.youtube.com/vi/{v_id}/hqdefault.jpg",
                         "isDownloading": False
                     })
                     
@@ -99,7 +99,8 @@ async def get_stream_url(video_id: str = Query(..., description="YouTube Video I
     🔊 Kararlı Akış Ucu. 
     ExoPlayer için bot engeline takılmayan ham ses linkini çıkartır.
     """
-    video_url = f"[https://www.youtube.com/watch?v=](https://www.youtube.com/watch?v=){video_id}"
+    # 🚀 KRİTİK DÜZELTME: [generic] hatasını engellemek için doğrudan extractor şablonunu (youtube:ID) kullanıyoruz
+    video_url = f"youtube:{video_id}"
     
     try:
         with YoutubeDL(get_yt_options(is_search=False)) as ydl:
@@ -116,7 +117,6 @@ async def get_stream_url(video_id: str = Query(..., description="YouTube Video I
             
     except Exception as e:
         print(f"Akış Sistem Hatası: {str(e)}")
-        # Eğer loglarda "Sign in to confirm..." hatası varsa, yukarıdaki çıktıdan kodun düşmesini bekleyeceğiz
         raise HTTPException(
             status_code=500, 
             detail="Müzik bağlantısı çıkartılamadı. Render loglarından cihaz onayını kontrol edin."
