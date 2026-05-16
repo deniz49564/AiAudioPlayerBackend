@@ -2,3 +2,4 @@ fastapi
 uvicorn
 yt-dlp
 requests
+requests==2.31.0
