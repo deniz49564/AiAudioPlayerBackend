@@ -2,7 +2,7 @@ import asyncio
 import os
 import uuid
 import glob
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, BackgroundTasks
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 import yt_dlp
@@ -17,6 +17,16 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Temizlik fonksiyonunu düzgün bir şekilde dışarı tanımlıyoruz
+def cleanup_file(file_path: str):
+    """Dosya istemciye tamamen iletildikten sonra çalışacak güvenli temizlik mekanizması"""
+    try:
+        if os.path.exists(file_path):
+            os.remove(file_path)
+            print(f"Geçici dosya başarıyla temizlendi: {file_path}")
+    except Exception as e:
+        print(f"Temizlik sırasında hata oluştu: {str(e)}")
 
 @app.get("/api/search")
 async def search_music(query: str = Query(..., description="Arama sorgusu")):
@@ -62,12 +72,13 @@ async def search_music(query: str = Query(..., description="Arama sorgusu")):
         return {"status": "error", "message": str(e), "data": []}
 
 @app.get("/api/stream")
-async def get_stream(video_id: str = Query(...)):
+async def get_stream(video_id: str, background_tasks: BackgroundTasks):
+    """
+    🚀 KESİN ÇÖZÜM: BackgroundTasks kullanarak dosyanın silinmesini 
+    aktarım bittikten sonrasına erteliyoruz.
+    """
     url = unquote(video_id).strip()
     unique_id = str(uuid.uuid4())
-    
-    # 🚀 FFmpeg gerektiren postprocessor'ları sildik. 
-    # Dosya hangi uzantıyla iniyorsa (.m4a, .webm vb.) öyle kaydedilecek.
     output_template = os.path.join("/tmp", f"music_{unique_id}.%(ext)s")
 
     ydl_opts = {
@@ -85,37 +96,30 @@ async def get_stream(video_id: str = Query(...)):
         loop = asyncio.get_event_loop()
         await loop.run_in_executor(None, download_track)
 
-        # 🚀 Sunucuya inen dosyanın gerçek uzantısını ve yolunu buluyoruz
+        # İnen dosyanın tam yolunu tespit ediyoruz
         search_pattern = os.path.join("/tmp", f"music_{unique_id}.*")
         found_files = glob.glob(search_pattern)
 
         if not found_files:
-            raise HTTPException(status_code=500, detail="Dosya sunucu diskine indirilemedi.")
+            raise HTTPException(status_code=500, detail="Dosya indirilemedi.")
         
-        # İnen gerçek dosyanın tam yolu (Örn: /tmp/music_xyz.m4a)
         actual_file_path = found_files[0]
 
-        # Dosya boş mu kontrolü
         if os.path.getsize(actual_file_path) == 0:
             if os.path.exists(actual_file_path): os.remove(actual_file_path)
-            raise HTTPException(status_code=500, detail="İndirilen dosya bos (0 byte).")
+            raise HTTPException(status_code=500, detail="İndirilen dosya bos.")
 
-        # Gönderim bittikten sonra diski temizleme görevi
-        def cleanup():
-            if os.path.exists(actual_file_path):
-                os.remove(actual_file_path)
+        # 🚀 Kritik Nokta: FastAPI'ye diyoruz ki, bu dosyayı göndermeyi BİTİRDİKTEN SONRA bu fonksiyonu çalıştır.
+        background_tasks.add_task(cleanup_file, actual_file_path)
 
-        # Android cihazın dosyayı müzik olarak tanıması için uygun MIME tipini ayarlıyoruz
-        # M4A veya MP3 olabileceği için genel 'audio/mpeg' veya 'audio/mp4' yerine ses olduğunu belirtmek yeterli
         return FileResponse(
             path=actual_file_path,
             media_type="audio/any",
-            filename=f"music{os.path.splitext(actual_file_path)[1]}", # Orijinal uzantısıyla gönderir (.m4a gibi)
-            background=asyncio.create_task(asyncio.to_thread(cleanup))
+            filename=f"music{os.path.splitext(actual_file_path)[1]}"
         )
 
     except Exception as e:
-        # Hata durumunda kalan çöp dosyaları temizle
+        # Hata durumunda (indirme tamamlanamadıysa) kalan artıkları hemen temizle
         search_pattern = os.path.join("/tmp", f"music_{unique_id}.*")
         for f in glob.glob(search_pattern):
             try: os.remove(f)
