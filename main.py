@@ -1,13 +1,14 @@
 import asyncio
+import os
+import uuid
 from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 import yt_dlp
 from urllib.parse import unquote
 
 app = FastAPI(title="AiAudioPlayer Backend")
 
-# Android cihazlardan ve emülatörlerden erişim için CORS ayarları
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -17,18 +18,12 @@ app.add_middleware(
 )
 
 @app.get("/api/search")
-async def search_music(query: str = Query(..., description="Arama sorgusu veya SoundCloud URL'i")):
-    """
-    Kullanıcının yazdığı kelimeye göre SoundCloud üzerinde arama yapar ve sonuç listesini döner.
-    """
+async def search_music(query: str = Query(..., description="Arama sorgusu")):
     search_query = unquote(query).strip()
     if not search_query:
-        return {"status": "error", "message": "Sorgu boş olamaz.", "data": []}
+        return {"status": "error", "message": "Sorgu bos olamaz.", "data": []}
 
-    if not search_query.startswith("http"):
-        ydl_url = f"scsearch5:{search_query}"
-    else:
-        ydl_url = search_query
+    ydl_url = f"scsearch5:{search_query}" if not search_query.startswith("http") else search_query
 
     ydl_opts = {
         'format': 'bestaudio/best',
@@ -46,80 +41,71 @@ async def search_music(query: str = Query(..., description="Arama sorgusu veya S
         result = await loop.run_in_executor(None, extract)
 
         tracks = []
-        if 'entries' in result:
-            entries = result['entries']
-        else:
-            entries = [result]
+        entries = result.get('entries', [result]) if result else []
 
         for entry in entries:
-            if not entry:
-                continue
-            
+            if not entry: continue
             track_url = entry.get('webpage_url') or entry.get('url')
-            if not track_url:
-                continue
+            if not track_url: continue
 
             tracks.append({
                 "id": entry.get('id', ''),
-                "title": entry.get('title', 'Bilinmeyen Şarkı'),
-                "artist": entry.get('uploader', 'Bilinmeyen Sanatçı'),
+                "title": entry.get('title', 'Bilinmeyen Sarki'),
+                "artist": entry.get('uploader', 'Bilinmeyen Sanatci'),
                 "duration": int(entry.get('duration', 0)) if entry.get('duration') else 0,
                 "coverUrl": entry.get('thumbnail', ''),
                 "downloadUrl": f"/api/stream?video_id={track_url}"
             })
-
         return {"status": "success", "data": tracks}
-
     except Exception as e:
-        return {"status": "error", "message": f"Arama hatası: {str(e)}", "data": []}
-
+        return {"status": "error", "message": str(e), "data": []}
 
 @app.get("/api/stream")
-async def get_stream(video_id: str = Query(..., description="Çözülecek parçanın tam URL'i veya ID'si")):
-    """
-    SoundCloud'un parça parça gönderdiği ses dosyalarını (HLS) sunucu üzerinde 
-    birleştirir ve istemciye tek bir ham ses dosyası akışı olarak tüneller.
-    """
+async def get_stream(video_id: str = Query(...)):
     url = unquote(video_id).strip()
-    
-    if not url.startswith("http"):
-        url = f"https://soundcloud.com/{url}"
+    unique_id = str(uuid.uuid4())
+    # 🚀 Kritik Değişiklik: Dosyayı önce ham formatta indirip sonra MP3'e çevireceğiz
+    output_path_template = os.path.join("/tmp", f"music_{unique_id}.%(ext)s")
+    final_mp3_path = os.path.join("/tmp", f"music_{unique_id}.mp3")
+
+    ydl_opts = {
+        'format': 'bestaudio/best',
+        'outtmpl': output_path_template,
+        'quiet': True,
+        'no_warnings': True,
+        # 🚀 SESİ STANDART MP3'E DÖNÜŞTÜRME (Fix for length issue)
+        'postprocessors': [{
+            'key': 'FFmpegExtractAudio',
+            'preferredcodec': 'mp3',
+            'preferredquality': '192',
+        }],
+    }
 
     try:
-        # İndirilen byte'ları sunucu diskine yazmadan doğrudan standart çıktıdan (stdout) okuyan jeneratör
-        async def stream_from_ytdl():
-            # -o - parametresi veriyi doğrudan stdout'a basmasını söyler
-            cmd = ["yt-dlp", "-o", "-", "-f", "bestaudio/best", url]
-            
-            process = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.DEVNULL
-            )
+        def download_and_convert():
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                ydl.download([url])
 
-            # 64KB'lık tampon bellek blokları halinde veriyi okuyup istemciye gönderiyoruz
-            while True:
-                chunk = await process.stdout.read(65536)
-                if not chunk:
-                    break
-                yield chunk
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, download_and_convert)
 
-            await process.wait()
+        if not os.path.exists(final_mp3_path):
+            raise HTTPException(status_code=500, detail="MP3 donusturulemedi.")
 
-        # Yanıtı doğrudan ses dosyası formatında maskeleyerek StreamingResponse ile dönüyoruz
-        return StreamingResponse(
-            stream_from_ytdl(),
+        def cleanup():
+            if os.path.exists(final_mp3_path):
+                os.remove(final_mp3_path)
+
+        return FileResponse(
+            path=final_mp3_path,
             media_type="audio/mpeg",
-            headers={
-                "Content-Disposition": "attachment; filename=music.mp3",
-                "Cache-Control": "no-cache",
-                "Connection": "keep-alive"
-            }
+            filename="music.mp3",
+            background=asyncio.create_task(asyncio.to_thread(cleanup))
         )
 
     except Exception as e:
-        print(f"Akış Hatası: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Akış Çözme Hatası: {str(e)}")
+        if os.path.exists(final_mp3_path): os.remove(final_mp3_path)
+        raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
     import uvicorn
