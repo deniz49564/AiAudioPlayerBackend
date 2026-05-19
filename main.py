@@ -3,11 +3,11 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 import yt_dlp
-import httpx
 from urllib.parse import unquote
 
 app = FastAPI(title="AiAudioPlayer Backend")
 
+# Android cihazlardan ve emülatörlerden erişim için CORS ayarları
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -18,6 +18,9 @@ app.add_middleware(
 
 @app.get("/api/search")
 async def search_music(query: str = Query(..., description="Arama sorgusu veya SoundCloud URL'i")):
+    """
+    Kullanıcının yazdığı kelimeye göre SoundCloud üzerinde arama yapar ve sonuç listesini döner.
+    """
     search_query = unquote(query).strip()
     if not search_query:
         return {"status": "error", "message": "Sorgu boş olamaz.", "data": []}
@@ -73,47 +76,39 @@ async def search_music(query: str = Query(..., description="Arama sorgusu veya S
 
 @app.get("/api/stream")
 async def get_stream(video_id: str = Query(..., description="Çözülecek parçanın tam URL'i veya ID'si")):
+    """
+    SoundCloud'un parça parça gönderdiği ses dosyalarını (HLS) sunucu üzerinde 
+    birleştirir ve istemciye tek bir ham ses dosyası akışı olarak tüneller.
+    """
     url = unquote(video_id).strip()
     
     if not url.startswith("http"):
         url = f"https://soundcloud.com/{url}"
 
-    ydl_opts = {
-        'format': 'bestaudio/best',
-        'quiet': True,
-        'no_warnings': True,
-    }
-
     try:
-        def run_ytdl():
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(url, download=False)
-                return info.get('url')
+        # İndirilen byte'ları sunucu diskine yazmadan doğrudan standart çıktıdan (stdout) okuyan jeneratör
+        async def stream_from_ytdl():
+            # -o - parametresi veriyi doğrudan stdout'a basmasını söyler
+            cmd = ["yt-dlp", "-o", "-", "-f", "bestaudio/best", url]
+            
+            process = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL
+            )
 
-        loop = asyncio.get_event_loop()
-        real_stream_url = await loop.run_in_executor(None, run_ytdl)
+            # 64KB'lık tampon bellek blokları halinde veriyi okuyup istemciye gönderiyoruz
+            while True:
+                chunk = await process.stdout.read(65536)
+                if not chunk:
+                    break
+                yield chunk
 
-        if not real_stream_url:
-            raise HTTPException(status_code=400, detail="Müzik akış adresi ayrıştırılamadı.")
+            await process.wait()
 
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Accept': '*/*',
-            'Accept-Language': 'en-US,en;q=0.9',
-        }
-
-        async def music_stream_generator():
-            async with httpx.AsyncClient(timeout=60.0) as client:
-                async with client.stream("GET", real_stream_url, headers=headers) as response:
-                    if response.status_code != 200:
-                        yield b""
-                        return
-                    # 🚀 Tertemiz döngü, takılmadan akıtacak:
-                    async for chunk in response.aiter_bytes(chunk_size=16384):
-                        yield chunk
-
+        # Yanıtı doğrudan ses dosyası formatında maskeleyerek StreamingResponse ile dönüyoruz
         return StreamingResponse(
-            music_stream_generator(),
+            stream_from_ytdl(),
             media_type="audio/mpeg",
             headers={
                 "Content-Disposition": "attachment; filename=music.mp3",
