@@ -1,6 +1,7 @@
 import asyncio
 import os
 import uuid
+import glob
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -64,47 +65,61 @@ async def search_music(query: str = Query(..., description="Arama sorgusu")):
 async def get_stream(video_id: str = Query(...)):
     url = unquote(video_id).strip()
     unique_id = str(uuid.uuid4())
-    # 🚀 Kritik Değişiklik: Dosyayı önce ham formatta indirip sonra MP3'e çevireceğiz
-    output_path_template = os.path.join("/tmp", f"music_{unique_id}.%(ext)s")
-    final_mp3_path = os.path.join("/tmp", f"music_{unique_id}.mp3")
+    
+    # 🚀 FFmpeg gerektiren postprocessor'ları sildik. 
+    # Dosya hangi uzantıyla iniyorsa (.m4a, .webm vb.) öyle kaydedilecek.
+    output_template = os.path.join("/tmp", f"music_{unique_id}.%(ext)s")
 
     ydl_opts = {
         'format': 'bestaudio/best',
-        'outtmpl': output_path_template,
+        'outtmpl': output_template,
         'quiet': True,
         'no_warnings': True,
-        # 🚀 SESİ STANDART MP3'E DÖNÜŞTÜRME (Fix for length issue)
-        'postprocessors': [{
-            'key': 'FFmpegExtractAudio',
-            'preferredcodec': 'mp3',
-            'preferredquality': '192',
-        }],
     }
 
     try:
-        def download_and_convert():
+        def download_track():
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 ydl.download([url])
 
         loop = asyncio.get_event_loop()
-        await loop.run_in_executor(None, download_and_convert)
+        await loop.run_in_executor(None, download_track)
 
-        if not os.path.exists(final_mp3_path):
-            raise HTTPException(status_code=500, detail="MP3 donusturulemedi.")
+        # 🚀 Sunucuya inen dosyanın gerçek uzantısını ve yolunu buluyoruz
+        search_pattern = os.path.join("/tmp", f"music_{unique_id}.*")
+        found_files = glob.glob(search_pattern)
 
+        if not found_files:
+            raise HTTPException(status_code=500, detail="Dosya sunucu diskine indirilemedi.")
+        
+        # İnen gerçek dosyanın tam yolu (Örn: /tmp/music_xyz.m4a)
+        actual_file_path = found_files[0]
+
+        # Dosya boş mu kontrolü
+        if os.path.getsize(actual_file_path) == 0:
+            if os.path.exists(actual_file_path): os.remove(actual_file_path)
+            raise HTTPException(status_code=500, detail="İndirilen dosya bos (0 byte).")
+
+        # Gönderim bittikten sonra diski temizleme görevi
         def cleanup():
-            if os.path.exists(final_mp3_path):
-                os.remove(final_mp3_path)
+            if os.path.exists(actual_file_path):
+                os.remove(actual_file_path)
 
+        # Android cihazın dosyayı müzik olarak tanıması için uygun MIME tipini ayarlıyoruz
+        # M4A veya MP3 olabileceği için genel 'audio/mpeg' veya 'audio/mp4' yerine ses olduğunu belirtmek yeterli
         return FileResponse(
-            path=final_mp3_path,
-            media_type="audio/mpeg",
-            filename="music.mp3",
+            path=actual_file_path,
+            media_type="audio/any",
+            filename=f"music{os.path.splitext(actual_file_path)[1]}", # Orijinal uzantısıyla gönderir (.m4a gibi)
             background=asyncio.create_task(asyncio.to_thread(cleanup))
         )
 
     except Exception as e:
-        if os.path.exists(final_mp3_path): os.remove(final_mp3_path)
+        # Hata durumunda kalan çöp dosyaları temizle
+        search_pattern = os.path.join("/tmp", f"music_{unique_id}.*")
+        for f in glob.glob(search_pattern):
+            try: os.remove(f)
+            except: pass
         raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
