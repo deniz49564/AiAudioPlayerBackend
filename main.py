@@ -1,11 +1,7 @@
-import asyncio
 import os
-import uuid
-import glob
-from fastapi import FastAPI, HTTPException, Query, BackgroundTasks
-from fastapi.responses import FileResponse
+import requests
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-import yt_dlp
 from urllib.parse import unquote
 
 app = FastAPI(title="AiAudioPlayer Backend")
@@ -18,136 +14,105 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-def cleanup_file(file_path: str):
-    try:
-        if os.path.exists(file_path):
-            os.remove(file_path)
-            print(f"Geçici dosya temizlendi: {file_path}")
-    except Exception as e:
-        print(f"Temizlik hatası: {str(e)}")
+# Jamendo API anahtarı (Render'da Environment Variable olarak ayarla)
+JAMENDO_CLIENT_ID = os.environ.get("JAMENDO_CLIENT_ID", "")
+
+# Jamendo API base URL
+JAMENDO_API_URL = "https://api.jamendo.com/v3.0"
 
 @app.get("/api/search")
 async def search_music(query: str = Query(..., description="Arama sorgusu")):
     search_query = unquote(query).strip()
     if not search_query:
         return {"status": "error", "message": "Sorgu boş olamaz.", "data": []}
-
-    ydl_url = f"ytsearch10:{search_query}"
-
-    # 🔥 COOKIE DESTEKLİ AYARLAR
-    ydl_opts = {
-        'format': 'bestaudio/best',
-        'quiet': True,
-        'no_warnings': True,
-        'extract_flat': 'in_playlist',
-        'cookiefile': 'cookies.txt',  # <--- EKLENDİ
-        'extractor_args': {
-            'youtube': {
-                'player_client': ['android', 'web'],
-                'skip': ['hls', 'dash'],
-            }
-        },
-    }
-
+    
+    if not JAMENDO_CLIENT_ID:
+        return {"status": "error", "message": "API anahtarı eksik. Lütfen JAMENDO_CLIENT_ID ayarlayın.", "data": []}
+    
     try:
-        def extract():
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                return ydl.extract_info(ydl_url, download=False)
-
-        loop = asyncio.get_event_loop()
-        result = await loop.run_in_executor(None, extract)
-
+        # Jamendo API ile şarkı ara
+        # Dökümantasyon: https://developer.jamendo.com/v3.0/tracks
+        params = {
+            'client_id': JAMENDO_CLIENT_ID,
+            'format': 'json',
+            'search': search_query,
+            'limit': 15,  # Maksimum 15 sonuç
+            'order': 'popularity_total',  # Popülerliğe göre sırala
+            'include_album_image': 'true'
+        }
+        
+        response = requests.get(f"{JAMENDO_API_URL}/tracks", params=params, timeout=30)
+        response.raise_for_status()
+        
+        data = response.json()
+        
         tracks = []
-        entries = result.get('entries', [result]) if result else []
-
-        for entry in entries:
-            if not entry: 
-                continue
+        for track in data.get('results', []):
+            # Jamendo'dan gelen audio linki DOĞRUDAN MP3!
+            # 'audio' = stream url, 'audiodownload' = download url
+            audio_url = track.get('audio', '')
+            download_url = track.get('audiodownload', '')
             
-            track_url = entry.get('webpage_url') or entry.get('url')
-            if not track_url:
-                continue
-
             tracks.append({
-                "id": entry.get('id', ''),
-                "title": entry.get('title', 'Bilinmeyen Şarkı'),
-                "artist": entry.get('uploader', 'YouTube Music'),
-                "duration": int(entry.get('duration', 0)) if entry.get('duration') else 0,
-                "coverUrl": entry.get('thumbnail', ''),
-                "downloadUrl": f"/api/stream?video_id={track_url}",
-                "sourcePlatform": "youtube"
+                "id": track.get('id', ''),
+                "title": track.get('name', 'Bilinmeyen Şarkı'),
+                "artist": track.get('artist_name', 'Bilinmeyen Sanatçı'),
+                "duration": track.get('duration', 0),
+                "coverUrl": track.get('album_image', ''),
+                # İKİ SEÇENEK: Dinlemek için audio, indirmek için audiodownload
+                "audioUrl": audio_url,  # Dinleme linki
+                "downloadUrl": download_url,  # İNDİRME LINKI (MP3!)
+                "sourcePlatform": "jamendo"
             })
         
-        return {"status": "success", "count": len(tracks), "data": tracks}
+        return {
+            "status": "success",
+            "count": len(tracks),
+            "data": tracks,
+            "platform": "jamendo"
+        }
     
-    except Exception as e:
-        print(f"Arama hatası: {e}")
+    except requests.exceptions.RequestException as e:
+        print(f"Jamendo API hatası: {e}")
         return {"status": "error", "message": str(e), "data": []}
 
 @app.get("/api/stream")
-async def get_stream(video_id: str, background_tasks: BackgroundTasks):
-    url = unquote(video_id).strip()
-    unique_id = str(uuid.uuid4())
-    output_template = os.path.join("/tmp", f"music_{unique_id}.%(ext)s")
-
-    # 🔥 COOKIE DESTEKLİ STREAM AYARLARI
-    ydl_opts = {
-        'format': 'bestaudio/best',
-        'outtmpl': output_template,
-        'quiet': True,
-        'no_warnings': True,
-        'cookiefile': 'cookies.txt',  # <--- EKLENDİ
-        'extractor_args': {
-            'youtube': {
-                'player_client': ['android', 'web'],
-                'skip': ['hls', 'dash'],
-            }
-        },
-    }
-
+async def get_stream(track_id: str):
+    """
+    Jamendo'dan şarkı çalmak için direkt audio URL'sini döndürür
+    """
+    if not JAMENDO_CLIENT_ID:
+        return {"status": "error", "message": "API anahtarı eksik"}, 500
+    
     try:
-        def download_track():
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                ydl.download([url])
-
-        loop = asyncio.get_event_loop()
-        await loop.run_in_executor(None, download_track)
-
-        search_pattern = os.path.join("/tmp", f"music_{unique_id}.*")
-        found_files = glob.glob(search_pattern)
-
-        if not found_files:
-            raise HTTPException(status_code=500, detail="Dosya indirilemedi.")
+        params = {
+            'client_id': JAMENDO_CLIENT_ID,
+            'format': 'json',
+            'id': track_id
+        }
         
-        actual_file_path = found_files[0]
-
-        if os.path.getsize(actual_file_path) == 0:
-            if os.path.exists(actual_file_path): 
-                os.remove(actual_file_path)
-            raise HTTPException(status_code=500, detail="İndirilen dosya boş.")
-
-        background_tasks.add_task(cleanup_file, actual_file_path)
-        ext = os.path.splitext(actual_file_path)[1]
+        response = requests.get(f"{JAMENDO_API_URL}/tracks", params=params, timeout=30)
+        response.raise_for_status()
         
-        return FileResponse(
-            path=actual_file_path,
-            media_type="audio/mpeg",
-            filename=f"music{ext}"
-        )
-
+        data = response.json()
+        
+        if data.get('results'):
+            track = data['results'][0]
+            audio_url = track.get('audio', '')
+            if audio_url:
+                return {"status": "success", "stream_url": audio_url, "source": "jamendo"}
+            else:
+                return {"status": "error", "message": "Bu şarkı için ses linki bulunamadı"}, 404
+        else:
+            return {"status": "error", "message": "Şarkı bulunamadı"}, 404
+            
     except Exception as e:
-        search_pattern = os.path.join("/tmp", f"music_{unique_id}.*")
-        for f in glob.glob(search_pattern):
-            try: 
-                os.remove(f)
-            except: 
-                pass
         print(f"Stream hatası: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        return {"status": "error", "message": str(e)}, 500
 
 @app.get("/api/health")
 async def health_check():
-    return {"status": "ok"}
+    return {"status": "ok", "api_configured": bool(JAMENDO_CLIENT_ID)}
 
 if __name__ == "__main__":
     import uvicorn
