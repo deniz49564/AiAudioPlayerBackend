@@ -1,8 +1,9 @@
 import os
-import requests
-from fastapi import FastAPI, HTTPException, Query
+import uuid
+import subprocess
+from fastapi import FastAPI, Query, HTTPException
+from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
-from urllib.parse import unquote
 
 app = FastAPI(title="AiAudioPlayer Backend")
 
@@ -14,105 +15,102 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Jamendo API anahtarı (Render'da Environment Variable olarak ayarla)
-JAMENDO_CLIENT_ID = os.environ.get("JAMENDO_CLIENT_ID", "")
-
-# Jamendo API base URL
-JAMENDO_API_URL = "https://api.jamendo.com/v3.0"
-
 @app.get("/api/search")
 async def search_music(query: str = Query(..., description="Arama sorgusu")):
-    search_query = unquote(query).strip()
-    if not search_query:
+    """
+    YouTube'da şarkı ara ve sonuçları döndür
+    """
+    if not query.strip():
         return {"status": "error", "message": "Sorgu boş olamaz.", "data": []}
     
-    if not JAMENDO_CLIENT_ID:
-        return {"status": "error", "message": "API anahtarı eksik. Lütfen JAMENDO_CLIENT_ID ayarlayın.", "data": []}
-    
     try:
-        # Jamendo API ile şarkı ara
-        # Dökümantasyon: https://developer.jamendo.com/v3.0/tracks
-        params = {
-            'client_id': JAMENDO_CLIENT_ID,
-            'format': 'json',
-            'search': search_query,
-            'limit': 15,  # Maksimum 15 sonuç
-            'order': 'popularity_total',  # Popülerliğe göre sırala
-            'include_album_image': 'true'
-        }
+        # yt-dlp ile JSON formatında arama yap
+        cmd = [
+            "yt-dlp",
+            f"ytsearch10:{query}",
+            "--dump-json",
+            "--skip-download",
+            "--no-warnings"
+        ]
         
-        response = requests.get(f"{JAMENDO_API_URL}/tracks", params=params, timeout=30)
-        response.raise_for_status()
-        
-        data = response.json()
+        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
         
         tracks = []
-        for track in data.get('results', []):
-            # Jamendo'dan gelen audio linki DOĞRUDAN MP3!
-            # 'audio' = stream url, 'audiodownload' = download url
-            audio_url = track.get('audio', '')
-            download_url = track.get('audiodownload', '')
-            
-            tracks.append({
-                "id": track.get('id', ''),
-                "title": track.get('name', 'Bilinmeyen Şarkı'),
-                "artist": track.get('artist_name', 'Bilinmeyen Sanatçı'),
-                "duration": track.get('duration', 0),
-                "coverUrl": track.get('album_image', ''),
-                # İKİ SEÇENEK: Dinlemek için audio, indirmek için audiodownload
-                "audioUrl": audio_url,  # Dinleme linki
-                "downloadUrl": download_url,  # İNDİRME LINKI (MP3!)
-                "sourcePlatform": "jamendo"
-            })
+        for line in result.stdout.strip().split('\n'):
+            if not line:
+                continue
+            import json
+            try:
+                data = json.loads(line)
+                tracks.append({
+                    "id": data.get('id', ''),
+                    "title": data.get('title', 'Bilinmeyen Şarkı'),
+                    "artist": data.get('uploader', 'Bilinmeyen Sanatçı'),
+                    "duration": data.get('duration', 0),
+                    "coverUrl": data.get('thumbnail', ''),
+                    "downloadUrl": f"/api/stream?video_id={data.get('id', '')}",
+                    "sourcePlatform": "youtube"
+                })
+            except:
+                continue
         
-        return {
-            "status": "success",
-            "count": len(tracks),
-            "data": tracks,
-            "platform": "jamendo"
-        }
+        return {"status": "success", "count": len(tracks), "data": tracks}
     
-    except requests.exceptions.RequestException as e:
-        print(f"Jamendo API hatası: {e}")
-        return {"status": "error", "message": str(e), "data": []}
+    except subprocess.CalledProcessError as e:
+        print(f"Arama hatası: {e.stderr}")
+        return {"status": "error", "message": str(e.stderr), "data": []}
 
 @app.get("/api/stream")
-async def get_stream(track_id: str):
+async def get_stream(video_id: str = Query(..., description="YouTube video ID'si")):
     """
-    Jamendo'dan şarkı çalmak için direkt audio URL'sini döndürür
+    YouTube videosunu MP3'e dönüştür ve dosya olarak gönder
     """
-    if not JAMENDO_CLIENT_ID:
-        return {"status": "error", "message": "API anahtarı eksik"}, 500
+    unique_id = str(uuid.uuid4())
+    output_path = f"/tmp/music_{unique_id}.mp3"
     
     try:
-        params = {
-            'client_id': JAMENDO_CLIENT_ID,
-            'format': 'json',
-            'id': track_id
-        }
+        # yt-dlp ile MP3 indir
+        cmd = [
+            "yt-dlp",
+            "-x",  # Ses çıkart
+            "--audio-format", "mp3",
+            "--audio-quality", "2",
+            "-o", output_path,
+            f"https://www.youtube.com/watch?v={video_id}"
+        ]
         
-        response = requests.get(f"{JAMENDO_API_URL}/tracks", params=params, timeout=30)
-        response.raise_for_status()
+        subprocess.run(cmd, capture_output=True, text=True, check=True)
         
-        data = response.json()
+        if not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
+            raise HTTPException(status_code=500, detail="Dosya oluşturulamadı.")
         
-        if data.get('results'):
-            track = data['results'][0]
-            audio_url = track.get('audio', '')
-            if audio_url:
-                return {"status": "success", "stream_url": audio_url, "source": "jamendo"}
-            else:
-                return {"status": "error", "message": "Bu şarkı için ses linki bulunamadı"}, 404
-        else:
-            return {"status": "error", "message": "Şarkı bulunamadı"}, 404
-            
-    except Exception as e:
-        print(f"Stream hatası: {e}")
-        return {"status": "error", "message": str(e)}, 500
+        # Dosyayı gönder ve işlem sonrası silinmesini planla
+        response = FileResponse(
+            path=output_path,
+            media_type="audio/mpeg",
+            filename=f"music_{video_id}.mp3"
+        )
+        
+        # Dosyayı gönderdikten sonra sil
+        def cleanup():
+            try:
+                if os.path.exists(output_path):
+                    os.remove(output_path)
+            except:
+                pass
+        
+        response.background = cleanup
+        return response
+    
+    except subprocess.CalledProcessError as e:
+        print(f"Stream hatası: {e.stderr}")
+        if os.path.exists(output_path):
+            os.remove(output_path)
+        raise HTTPException(status_code=500, detail=str(e.stderr))
 
 @app.get("/api/health")
 async def health_check():
-    return {"status": "ok", "api_configured": bool(JAMENDO_CLIENT_ID)}
+    return {"status": "ok"}
 
 if __name__ == "__main__":
     import uvicorn
