@@ -18,7 +18,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Temizlik fonksiyonunu düzgün bir şekilde dışarı tanımlıyoruz
 def cleanup_file(file_path: str):
     """Dosya istemciye tamamen iletildikten sonra çalışacak güvenli temizlik mekanizması"""
     try:
@@ -34,7 +33,8 @@ async def search_music(query: str = Query(..., description="Arama sorgusu")):
     if not search_query:
         return {"status": "error", "message": "Sorgu bos olamaz.", "data": []}
 
-    ydl_url = f"scsearch5:{search_query}" if not search_query.startswith("http") else search_query
+    # ✅ DÜZELTİLDİ: SADECE YouTube kullan (SoundCloud yok!)
+    ydl_url = f"ytsearch10:{search_query}"
 
     ydl_opts = {
         'format': 'bestaudio/best',
@@ -55,27 +55,33 @@ async def search_music(query: str = Query(..., description="Arama sorgusu")):
         entries = result.get('entries', [result]) if result else []
 
         for entry in entries:
-            if not entry: continue
+            if not entry: 
+                continue
+            
             track_url = entry.get('webpage_url') or entry.get('url')
-            if not track_url: continue
+            if not track_url:
+                continue
 
             tracks.append({
                 "id": entry.get('id', ''),
                 "title": entry.get('title', 'Bilinmeyen Sarki'),
-                "artist": entry.get('uploader', 'Bilinmeyen Sanatci'),
+                "artist": entry.get('uploader', 'YouTube Music'),
                 "duration": int(entry.get('duration', 0)) if entry.get('duration') else 0,
                 "coverUrl": entry.get('thumbnail', ''),
-                "downloadUrl": f"/api/stream?video_id={track_url}"
+                "downloadUrl": f"/api/stream?video_id={track_url}",
+                "sourcePlatform": "youtube"
             })
-        return {"status": "success", "data": tracks}
+        
+        return {"status": "success", "count": len(tracks), "data": tracks}
+    
     except Exception as e:
+        print(f"Arama hatası: {e}")
         return {"status": "error", "message": str(e), "data": []}
 
 @app.get("/api/stream")
 async def get_stream(video_id: str, background_tasks: BackgroundTasks):
     """
-    🚀 KESİN ÇÖZÜM: BackgroundTasks kullanarak dosyanın silinmesini 
-    aktarım bittikten sonrasına erteliyoruz.
+    YouTube'dan müzik indir ve gönder
     """
     url = unquote(video_id).strip()
     unique_id = str(uuid.uuid4())
@@ -86,6 +92,14 @@ async def get_stream(video_id: str, background_tasks: BackgroundTasks):
         'outtmpl': output_template,
         'quiet': True,
         'no_warnings': True,
+        'extract_audio': True,
+        'audio_format': 'mp3',
+        'audio_quality': '192',
+        'postprocessors': [{
+            'key': 'FFmpegExtractAudio',
+            'preferredcodec': 'mp3',
+            'preferredquality': '192',
+        }],
     }
 
     try:
@@ -106,25 +120,37 @@ async def get_stream(video_id: str, background_tasks: BackgroundTasks):
         actual_file_path = found_files[0]
 
         if os.path.getsize(actual_file_path) == 0:
-            if os.path.exists(actual_file_path): os.remove(actual_file_path)
+            if os.path.exists(actual_file_path): 
+                os.remove(actual_file_path)
             raise HTTPException(status_code=500, detail="İndirilen dosya bos.")
 
-        # 🚀 Kritik Nokta: FastAPI'ye diyoruz ki, bu dosyayı göndermeyi BİTİRDİKTEN SONRA bu fonksiyonu çalıştır.
         background_tasks.add_task(cleanup_file, actual_file_path)
 
+        # Dosya uzantısını al
+        ext = os.path.splitext(actual_file_path)[1]
+        if ext == '.webm':
+            ext = '.mp3'
+        
         return FileResponse(
             path=actual_file_path,
-            media_type="audio/any",
-            filename=f"music{os.path.splitext(actual_file_path)[1]}"
+            media_type="audio/mpeg",
+            filename=f"music{ext}"
         )
 
     except Exception as e:
-        # Hata durumunda (indirme tamamlanamadıysa) kalan artıkları hemen temizle
+        # Hata durumunda kalan artıkları temizle
         search_pattern = os.path.join("/tmp", f"music_{unique_id}.*")
         for f in glob.glob(search_pattern):
-            try: os.remove(f)
-            except: pass
+            try: 
+                os.remove(f)
+            except: 
+                pass
+        print(f"Stream hatası: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/health")
+async def health_check():
+    return {"status": "ok"}
 
 if __name__ == "__main__":
     import uvicorn
