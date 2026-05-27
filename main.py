@@ -32,19 +32,19 @@ async def search_music(query: str = Query(..., description="Arama sorgusu")):
     if not search_query:
         return {"status": "error", "message": "Sorgu boş olamaz.", "data": []}
 
-    # YouTube arama (SoundCloud yok!)
     ydl_url = f"ytsearch10:{search_query}"
 
-    # COOKIE'SİZ ÇALIŞAN AYARLAR
+    # 🔥 COOKIE DESTEKLİ AYARLAR
     ydl_opts = {
         'format': 'bestaudio/best',
         'quiet': True,
         'no_warnings': True,
         'extract_flat': 'in_playlist',
+        'cookiefile': 'cookies.txt',  # <--- EKLENDİ
         'extractor_args': {
             'youtube': {
-                'player_client': ['android', 'web'],  # Android client daha esnek
-                'skip': ['hls', 'dash'],  # Bazı formatları atla
+                'player_client': ['android', 'web'],
+                'skip': ['hls', 'dash'],
             }
         },
     }
@@ -90,15 +90,16 @@ async def get_stream(video_id: str, background_tasks: BackgroundTasks):
     unique_id = str(uuid.uuid4())
     output_template = os.path.join("/tmp", f"music_{unique_id}.%(ext)s")
 
-    # COOKIE'SİZ ÇALIŞAN STREAM AYARLARI
+    # 🔥 COOKIE DESTEKLİ STREAM AYARLARI
     ydl_opts = {
         'format': 'bestaudio/best',
         'outtmpl': output_template,
         'quiet': True,
         'no_warnings': True,
+        'cookiefile': 'cookies.txt',  # <--- EKLENDİ
         'extractor_args': {
             'youtube': {
-                'player_client': ['android', 'web'],  # Android client daha iyi
+                'player_client': ['android', 'web'],
                 'skip': ['hls', 'dash'],
             }
         },
