@@ -19,28 +19,34 @@ app.add_middleware(
 )
 
 def cleanup_file(file_path: str):
-    """Dosya istemciye tamamen iletildikten sonra çalışacak güvenli temizlik mekanizması"""
     try:
         if os.path.exists(file_path):
             os.remove(file_path)
-            print(f"Geçici dosya başarıyla temizlendi: {file_path}")
+            print(f"Geçici dosya temizlendi: {file_path}")
     except Exception as e:
-        print(f"Temizlik sırasında hata oluştu: {str(e)}")
+        print(f"Temizlik hatası: {str(e)}")
 
 @app.get("/api/search")
 async def search_music(query: str = Query(..., description="Arama sorgusu")):
     search_query = unquote(query).strip()
     if not search_query:
-        return {"status": "error", "message": "Sorgu bos olamaz.", "data": []}
+        return {"status": "error", "message": "Sorgu boş olamaz.", "data": []}
 
-    # ✅ DÜZELTİLDİ: SADECE YouTube kullan (SoundCloud yok!)
+    # YouTube arama (SoundCloud yok!)
     ydl_url = f"ytsearch10:{search_query}"
 
+    # COOKIE'SİZ ÇALIŞAN AYARLAR
     ydl_opts = {
         'format': 'bestaudio/best',
         'quiet': True,
         'no_warnings': True,
         'extract_flat': 'in_playlist',
+        'extractor_args': {
+            'youtube': {
+                'player_client': ['android', 'web'],  # Android client daha esnek
+                'skip': ['hls', 'dash'],  # Bazı formatları atla
+            }
+        },
     }
 
     try:
@@ -64,7 +70,7 @@ async def search_music(query: str = Query(..., description="Arama sorgusu")):
 
             tracks.append({
                 "id": entry.get('id', ''),
-                "title": entry.get('title', 'Bilinmeyen Sarki'),
+                "title": entry.get('title', 'Bilinmeyen Şarkı'),
                 "artist": entry.get('uploader', 'YouTube Music'),
                 "duration": int(entry.get('duration', 0)) if entry.get('duration') else 0,
                 "coverUrl": entry.get('thumbnail', ''),
@@ -80,26 +86,22 @@ async def search_music(query: str = Query(..., description="Arama sorgusu")):
 
 @app.get("/api/stream")
 async def get_stream(video_id: str, background_tasks: BackgroundTasks):
-    """
-    YouTube'dan müzik indir ve gönder
-    """
     url = unquote(video_id).strip()
     unique_id = str(uuid.uuid4())
     output_template = os.path.join("/tmp", f"music_{unique_id}.%(ext)s")
 
+    # COOKIE'SİZ ÇALIŞAN STREAM AYARLARI
     ydl_opts = {
         'format': 'bestaudio/best',
         'outtmpl': output_template,
         'quiet': True,
         'no_warnings': True,
-        'extract_audio': True,
-        'audio_format': 'mp3',
-        'audio_quality': '192',
-        'postprocessors': [{
-            'key': 'FFmpegExtractAudio',
-            'preferredcodec': 'mp3',
-            'preferredquality': '192',
-        }],
+        'extractor_args': {
+            'youtube': {
+                'player_client': ['android', 'web'],  # Android client daha iyi
+                'skip': ['hls', 'dash'],
+            }
+        },
     }
 
     try:
@@ -110,7 +112,6 @@ async def get_stream(video_id: str, background_tasks: BackgroundTasks):
         loop = asyncio.get_event_loop()
         await loop.run_in_executor(None, download_track)
 
-        # İnen dosyanın tam yolunu tespit ediyoruz
         search_pattern = os.path.join("/tmp", f"music_{unique_id}.*")
         found_files = glob.glob(search_pattern)
 
@@ -122,14 +123,10 @@ async def get_stream(video_id: str, background_tasks: BackgroundTasks):
         if os.path.getsize(actual_file_path) == 0:
             if os.path.exists(actual_file_path): 
                 os.remove(actual_file_path)
-            raise HTTPException(status_code=500, detail="İndirilen dosya bos.")
+            raise HTTPException(status_code=500, detail="İndirilen dosya boş.")
 
         background_tasks.add_task(cleanup_file, actual_file_path)
-
-        # Dosya uzantısını al
         ext = os.path.splitext(actual_file_path)[1]
-        if ext == '.webm':
-            ext = '.mp3'
         
         return FileResponse(
             path=actual_file_path,
@@ -138,7 +135,6 @@ async def get_stream(video_id: str, background_tasks: BackgroundTasks):
         )
 
     except Exception as e:
-        # Hata durumunda kalan artıkları temizle
         search_pattern = os.path.join("/tmp", f"music_{unique_id}.*")
         for f in glob.glob(search_pattern):
             try: 
